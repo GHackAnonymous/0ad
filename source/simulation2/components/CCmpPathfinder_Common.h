@@ -106,13 +106,14 @@ public:
 
 	u16 m_MapSize; // tiles per side
 	Grid<NavcellData>* m_Grid; // terrain/passability information
-	Grid<NavcellData>* m_BaseGrid; // same as m_Grid, but only with terrain, to avoid some recomputations
-	bool m_TerrainDirty; // indicates if m_Grid has been updated since terrain changed
+	Grid<NavcellData>* m_TerrainOnlyGrid; // same as m_Grid, but only with terrain, to avoid some recomputations
 
-	// Update data, stored for the AI manager
-	bool m_ObstructionsDirty;
-	bool m_ObstructionsGlobalUpdate;
-	Grid<u8> m_DirtinessGrid;
+	// Update data, used for clever updates and then stored for the AI manager
+	GridUpdateInformation m_ObstructionsDirty;
+	bool m_TerrainDirty;
+	// When other components request the passability grid and trigger an update, 
+	// the following regular update should not clean the dirtiness state.
+	bool m_PreserveUpdateInformations;
 
 	// Interface to the long-range pathfinder.
 	LongPathfinder m_LongPathfinder;
@@ -143,13 +144,14 @@ public:
 
 	virtual std::map<std::string, pass_class_t> GetPassabilityClasses();
 
+	virtual std::map<std::string, pass_class_t> GetPathfindingPassabilityClasses();
+
 	const PathfinderPassability* GetPassabilityFromMask(pass_class_t passClass) const;
 
 	virtual entity_pos_t GetClearance(pass_class_t passClass) const
 	{
 		const PathfinderPassability* passability = GetPassabilityFromMask(passClass);
-
-		if (!passability->m_HasClearance)
+		if (!passability)
 			return fixed::Zero();
 
 		return passability->m_Clearance;
@@ -160,17 +162,15 @@ public:
 		entity_pos_t max = fixed::Zero();
 
 		for (const PathfinderPassability& passability : m_PassClasses)
-		{
-			if (passability.m_HasClearance && passability.m_Clearance > max)
+			if (passability.m_Clearance > max)
 				max = passability.m_Clearance;
-		}
 
 		return max;
 	}
 
 	virtual const Grid<u16>& GetPassabilityGrid();
 
-	virtual bool GetDirtinessData(Grid<u8>& dirtinessGrid, bool& globalUpdateNeeded);
+	virtual const GridUpdateInformation& GetDirtinessData() const;
 
 	virtual Grid<u16> ComputeShoreGrid(bool expandOnWater = false);
 

@@ -56,6 +56,11 @@ public:
 	virtual std::map<std::string, pass_class_t> GetPassabilityClasses() = 0;
 
 	/**
+	* Get the list of pathfinding passability classes.
+	*/
+	virtual std::map<std::string, pass_class_t> GetPathfindingPassabilityClasses() = 0;
+
+	/**
 	 * Get the tag for a given passability class name.
 	 * Logs an error and returns something acceptable if the name is unrecognised.
 	 */
@@ -74,7 +79,7 @@ public:
 	 * Passes the lazily-stored dirtiness data collected from
 	 * the obstruction manager during the previous grid update.
 	 */
-	virtual bool GetDirtinessData(Grid<u8>& dirtinessGrid, bool& globalUpdateNeeded) = 0;
+	virtual const GridUpdateInformation& GetDirtinessData() const = 0;
 
 	/**
 	 * Get a grid representing the distance to the shore of the terrain tile.

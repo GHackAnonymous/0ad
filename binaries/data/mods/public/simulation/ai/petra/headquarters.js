@@ -655,6 +655,11 @@ m.HQ.prototype.findEconomicCCLocation = function(gameState, template, resource, 
 
 	// obstruction map
 	var obstructions = m.createObstructionMap(gameState, 0, template);
+	var halfSize = 0;
+	if (template.get("Footprint/Square"))
+		halfSize = Math.max(+template.get("Footprint/Square/@depth"), +template.get("Footprint/Square/@width")) / 2;
+	else if (template.get("Footprint/Circle"))
+		halfSize = +template.get("Footprint/Circle/@radius");
 
 	var ccEnts = gameState.updatingGlobalCollection("allCCs", API3.Filters.byClass("CivCentre"));
 	var dpEnts = gameState.getOwnDropsites().filter(API3.Filters.not(API3.Filters.byClassesOr(["CivCentre", "Elephant"])));
@@ -707,16 +712,16 @@ m.HQ.prototype.findEconomicCCLocation = function(gameState, template, resource, 
 
 		if (proximity)	// this is our first cc, let's do it near our units 
 		{
-			var dist = API3.SquareVectorDistance(proximity, pos);
+			let dist = API3.SquareVectorDistance(proximity, pos);
 			norm /= (1 + dist/scale);
 		}
 		else
 		{
 			var minDist = Math.min();
 
-			for (var cc of ccList)
+			for (let cc of ccList)
 			{
-				var dist = API3.SquareVectorDistance(cc.pos, pos);
+				let dist = API3.SquareVectorDistance(cc.pos, pos);
 				if (dist < 14000)    // Reject if too near from any cc
 				{
 					norm = 0
@@ -755,9 +760,9 @@ m.HQ.prototype.findEconomicCCLocation = function(gameState, template, resource, 
 					norm *= 0.5;
 			}
 
-			for (var dp of dpList)
+			for (let dp of dpList)
 			{
-				var dist = API3.SquareVectorDistance(dp.pos, pos);
+				let dist = API3.SquareVectorDistance(dp.pos, pos);
 				if (dist < 3600)
 				{
 					norm = 0;
@@ -780,6 +785,8 @@ m.HQ.prototype.findEconomicCCLocation = function(gameState, template, resource, 
 		val *= norm;
 
 		if (bestVal !== undefined && val < bestVal)
+			continue;
+		if (this.isDangerousLocation(gameState, pos, halfSize))
 			continue;
 		bestVal = val;
 		bestIdx = i;
@@ -839,6 +846,11 @@ m.HQ.prototype.findStrategicCCLocation = function(gameState, template)
 
 	// obstruction map
 	var obstructions = m.createObstructionMap(gameState, 0, template);
+	var halfSize = 0;
+	if (template.get("Footprint/Square"))
+		halfSize = Math.max(+template.get("Footprint/Square/@depth"), +template.get("Footprint/Square/@width")) / 2;
+	else if (template.get("Footprint/Circle"))
+		halfSize = +template.get("Footprint/Circle/@radius");
 
 	var bestIdx = undefined;
 	var bestVal = undefined;
@@ -867,9 +879,9 @@ m.HQ.prototype.findStrategicCCLocation = function(gameState, template)
 		var minDist = Math.min();
 		distcc0 = undefined;
 
-		for (var cc of ccList)
+		for (let cc of ccList)
 		{
-			var dist = API3.SquareVectorDistance(cc.pos, pos);
+			let dist = API3.SquareVectorDistance(cc.pos, pos);
 			if (dist < 14000)    // Reject if too near from any cc
 			{
 				minDist = 0;
@@ -917,6 +929,8 @@ m.HQ.prototype.findStrategicCCLocation = function(gameState, template)
 
 		if (bestVal !== undefined && currentVal > bestVal)
 			continue;
+		if (this.isDangerousLocation(gameState, pos, halfSize))
+			continue;
 		bestVal = currentVal;
 		bestIdx = i;
 	}
@@ -961,9 +975,15 @@ m.HQ.prototype.findMarketLocation = function(gameState, template)
 
 	// obstruction map
 	var obstructions = m.createObstructionMap(gameState, 0, template);
+	var halfSize = 0;
+	if (template.get("Footprint/Square"))
+		halfSize = Math.max(+template.get("Footprint/Square/@depth"), +template.get("Footprint/Square/@width")) / 2;
+	else if (template.get("Footprint/Circle"))
+		halfSize = +template.get("Footprint/Circle/@radius");
 
-	var bestIdx = undefined;
-	var bestVal = undefined;
+	var bestIdx;
+	var bestJdx;
+	var bestVal;
 	var radius = Math.ceil(template.obstructionRadius() / obstructions.cellSize);
 	var isNavalMarket = template.hasClass("NavalMarket");
 
@@ -988,7 +1008,7 @@ m.HQ.prototype.findMarketLocation = function(gameState, template)
 		var pos = [cellSize * (j%width+0.5), cellSize * (Math.floor(j/width)+0.5)];
 		// checking distances to other markets
 		var maxDist = 0;
-		for (var market of markets)
+		for (let market of markets)
 		{
 			if (isNavalMarket && market.hasClass("NavalMarket"))
 			{
@@ -996,7 +1016,7 @@ m.HQ.prototype.findMarketLocation = function(gameState, template)
 			}
 			else if (gameState.ai.accessibility.getAccessValue(market.position()) != index)
 				continue;
-			var dist = API3.SquareVectorDistance(market.position(), pos);
+			let dist = API3.SquareVectorDistance(market.position(), pos);
 			if (dist > maxDist)
 				maxDist = dist;
 		}
@@ -1004,8 +1024,11 @@ m.HQ.prototype.findMarketLocation = function(gameState, template)
 			continue;
 		if (bestVal !== undefined && maxDist < bestVal)
 			continue;
+		if (this.isDangerousLocation(gameState, pos, halfSize))
+			continue;
 		bestVal = maxDist;
 		bestIdx = i;
+		bestJdx = j;
 	}
 
 	if (this.Config.debug > 1)
@@ -1024,7 +1047,7 @@ m.HQ.prototype.findMarketLocation = function(gameState, template)
 
 	var x = (bestIdx % obstructions.width + 0.5) * obstructions.cellSize;
 	var z = (Math.floor(bestIdx / obstructions.width) + 0.5) * obstructions.cellSize;
-	return [x, z, this.basesMap.map[bestIdx], expectedGain];
+	return [x, z, this.basesMap.map[bestJdx], expectedGain];
 };
 
 // Returns the best position to build defensive buildings (fortress and towers)
@@ -1050,6 +1073,11 @@ m.HQ.prototype.findDefensiveLocation = function(gameState, template)
 
 	// obstruction map
 	var obstructions = m.createObstructionMap(gameState, 0, template);
+	var halfSize = 0;
+	if (template.get("Footprint/Square"))
+		halfSize = Math.max(+template.get("Footprint/Square/@depth"), +template.get("Footprint/Square/@width")) / 2;
+	else if (template.get("Footprint/Circle"))
+		halfSize = +template.get("Footprint/Circle/@radius");
 
 	var bestIdx = undefined;
 	var bestJdx = undefined;
@@ -1094,14 +1122,14 @@ m.HQ.prototype.findDefensiveLocation = function(gameState, template)
 			dista *= 200;   // empirical factor (TODO should depend on map size) to stay near the wonder
 		}
 
-		for (var str of enemyStructures)
+		for (let str of enemyStructures)
 		{
 			if (str.foundationProgress() !== undefined)
 				continue;
-			var strPos = str.position();
+			let strPos = str.position();
 			if (!strPos)
 				continue;
-			var dist = API3.SquareVectorDistance(strPos, pos);
+			let dist = API3.SquareVectorDistance(strPos, pos);
 			if (dist < 6400) //  TODO check on true attack range instead of this 80*80 
 			{
 				minDist = -1;
@@ -1113,9 +1141,9 @@ m.HQ.prototype.findDefensiveLocation = function(gameState, template)
 		if (minDist < 0)
 			continue;
 
-		for (var str of ownStructures)
+		for (let str of ownStructures)
 		{
-			var strPos = str.position();
+			let strPos = str.position();
 			if (!strPos)
 				continue;
 			var dist = API3.SquareVectorDistance(strPos, pos);
@@ -1132,6 +1160,8 @@ m.HQ.prototype.findDefensiveLocation = function(gameState, template)
 		if (minDist < 0)
 			continue;
 		if (bestVal !== undefined && minDist > bestVal)
+			continue;
+		if (this.isDangerousLocation(gameState, pos, halfSize))
 			continue;
 		bestVal = minDist;
 		bestIdx = i;
@@ -1805,12 +1835,30 @@ m.HQ.prototype.assignGatherers = function(gameState)
 	}
 };
 
-// Check that the chosen position is not too near from an invading army
-m.HQ.prototype.isDangerousLocation = function(pos)
+m.HQ.prototype.isDangerousLocation = function(gameState, pos, radius)
 {
-	for (var army of this.defenseManager.armies)
+	return this.isNearInvadingArmy(pos) || this.isUnderEnemyFire(gameState, pos, radius);
+};
+
+// Check that the chosen position is not too near from an invading army
+m.HQ.prototype.isNearInvadingArmy = function(pos)
+{
+	for (let army of this.defenseManager.armies)
 		if (army.foePosition && API3.SquareVectorDistance(army.foePosition, pos) < 12000)
 			return true;
+	return false;
+};
+
+m.HQ.prototype.isUnderEnemyFire = function(gameState, pos, radius = 0)
+{
+	if (!this.turnCache["firingStructures"])
+		this.turnCache["firingStructures"] = gameState.updatingGlobalCollection("FiringStructures", API3.Filters.hasDefensiveFire(), gameState.getEnemyStructures());
+	for (let ent of this.turnCache["firingStructures"].values())
+	{
+		let range = radius + ent.attackRange("Ranged").max;
+		if (API3.SquareVectorDistance(ent.position(), pos) < range*range)
+			return true;
+	}
 	return false;
 };
 
@@ -1969,7 +2017,6 @@ m.HQ.prototype.update = function(gameState, queues, events)
 m.HQ.prototype.Serialize = function()
 {
 	let properties = {
-		"turnCache": this.turnCache,
 		"econState": this.econState,
 		"currentPhase": this.currentPhase,
 		"wantedRates": this.wantedRates,
@@ -2041,6 +2088,10 @@ m.HQ.prototype.Deserialize = function(gameState, data)
 		this.baseManagers.push(newbase);
 	}
 
+	this.navalManager = new m.NavalManager(this.Config);
+	this.navalManager.init(gameState, true);
+	this.navalManager.Deserialize(gameState, data.navalManager);
+
 	this.attackManager = new m.AttackManager(this.Config);
 	this.attackManager.Deserialize(gameState, data.attackManager);
 	this.attackManager.init(gameState);
@@ -2052,10 +2103,6 @@ m.HQ.prototype.Deserialize = function(gameState, data)
 	this.tradeManager = new m.TradeManager(this.Config);
 	this.tradeManager.init(gameState);
 	this.tradeManager.Deserialize(gameState, data.tradeManager);
-
-	this.navalManager = new m.NavalManager(this.Config);
-	this.navalManager.init(gameState, true);
-	this.navalManager.Deserialize(gameState, data.navalManager);
 
 	this.researchManager = new m.ResearchManager(this.Config);
 	this.researchManager.Deserialize(data.researchManager);

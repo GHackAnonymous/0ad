@@ -147,19 +147,15 @@ m.SharedScript.prototype.init = function(state, deserialization)
 /*
 	var landPassMap = new Uint8Array(this.passabilityMap.data.length);
 	var waterPassMap = new Uint8Array(this.passabilityMap.data.length);
-	var obstructionMap = new Uint8Array(this.passabilityMap.data.length);
-	var obstructionMaskLand = this.passabilityClasses["default"];
-	var obstructionMaskWater = this.passabilityClasses["ship"];
-	var obstructionMask = this.passabilityClasses["pathfinderObstruction"];
+	var obstructionMaskLand = this.passabilityClasses["default-terrain-only"];
+	var obstructionMaskWater = this.passabilityClasses["ship-terrain-only"];
 	for (var i = 0; i < this.passabilityMap.data.length; ++i)
 	{
 		landPassMap[i] = (this.passabilityMap.data[i] & obstructionMaskLand) ? 0 : 255;
 		waterPassMap[i] = (this.passabilityMap.data[i] & obstructionMaskWater) ? 0 : 255;
-		obstructionMap[i] = (this.passabilityMap.data[i] & obstructionMask) ? 0 : 255;
 	}
 	Engine.DumpImage("LandPassMap.png", landPassMap, this.passabilityMap.width, this.passabilityMap.height, 255);
 	Engine.DumpImage("WaterPassMap.png", waterPassMap, this.passabilityMap.width, this.passabilityMap.height, 255);
-	Engine.DumpImage("ObstrctionMap.png", obstructionMap, this.passabilityMap.width, this.passabilityMap.height, 255);
 */
 
 	this._entities = new Map();
@@ -217,9 +213,8 @@ m.SharedScript.prototype.onUpdate = function(state)
 	for (var i in this.gameState)
 		this.gameState[i].update(this,state);
 
-	// TODO: merge those two with "ApplyEntitiesDelta" since after all they do the same.
+	// TODO: merge this with "ApplyEntitiesDelta" since after all they do the same.
 	this.updateResourceMaps(this, this.events);
-	this.terrainAnalyzer.updateMapWithEvents(this);
 	
 	Engine.ProfileStop();
 };

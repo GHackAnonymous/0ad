@@ -137,12 +137,15 @@ public:
 	u32 m_UnitShapeNext; // next allocated id
 	u32 m_StaticShapeNext;
 
+	entity_pos_t m_MaxClearance;
+
 	bool m_PassabilityCircular;
 
 	entity_pos_t m_WorldX0;
 	entity_pos_t m_WorldZ0;
 	entity_pos_t m_WorldX1;
 	entity_pos_t m_WorldZ1;
+	u16 m_TerrainTiles;
 
 	static std::string GetSchema()
 	{
@@ -157,13 +160,14 @@ public:
 		m_UnitShapeNext = 1;
 		m_StaticShapeNext = 1;
 
-		m_Dirty = true;
-		m_NeedsGlobalUpdate = true;
-		m_DirtinessGrid = NULL;
+		m_UpdateInformations.dirty = true;
+		m_UpdateInformations.globallyDirty = true;
+		m_UpdateInformations.globalRecompute = true;
 
 		m_PassabilityCircular = false;
 
 		m_WorldX0 = m_WorldZ0 = m_WorldX1 = m_WorldZ1 = entity_pos_t::Zero();
+		m_TerrainTiles = 0;
 
 		// Initialise with bogus values (these will get replaced when
 		// SetBounds is called)
@@ -172,7 +176,6 @@ public:
 
 	virtual void Deinit()
 	{
-		SAFE_DELETE(m_DirtinessGrid);
 	}
 
 	template<typename S>
@@ -192,6 +195,7 @@ public:
 		serialize.NumberFixed_Unbounded("world z0", m_WorldZ0);
 		serialize.NumberFixed_Unbounded("world x1", m_WorldX1);
 		serialize.NumberFixed_Unbounded("world z1", m_WorldZ1);
+		serialize.NumberU16_Unbounded("terrain tiles", m_TerrainTiles);
 	}
 
 	virtual void Serialize(ISerializer& serialize)
@@ -207,6 +211,8 @@ public:
 		Init(paramNode);
 
 		SerializeCommon(deserialize);
+
+		m_UpdateInformations.dirtinessGrid = Grid<u8>(m_TerrainTiles*Pathfinding::NAVCELLS_PER_TILE, m_TerrainTiles*Pathfinding::NAVCELLS_PER_TILE);
 	}
 
 	virtual void HandleMessage(const CMessage& msg, bool UNUSED(global))
@@ -234,14 +240,16 @@ public:
 		ENSURE(x0.IsZero() && z0.IsZero()); // don't bother implementing non-zero offsets yet
 		ResetSubdivisions(x1, z1);
 
-		SAFE_DELETE(m_DirtinessGrid);
-
 		CmpPtr<ICmpTerrain> cmpTerrain(GetSystemEntity());
 		if (!cmpTerrain)
 			return;
 
-		u16 tiles = cmpTerrain->GetTilesPerSide();
-		m_DirtinessGrid = new Grid<u8>(tiles*Pathfinding::NAVCELLS_PER_TILE, tiles*Pathfinding::NAVCELLS_PER_TILE);
+		m_TerrainTiles = cmpTerrain->GetTilesPerSide();
+		m_UpdateInformations.dirtinessGrid = Grid<u8>(m_TerrainTiles*Pathfinding::NAVCELLS_PER_TILE, m_TerrainTiles*Pathfinding::NAVCELLS_PER_TILE);
+
+		CmpPtr<ICmpPathfinder> cmpPathfinder(GetSystemEntity());
+		if (cmpPathfinder)
+			m_MaxClearance = cmpPathfinder->GetMaximumClearance();
 	}
 
 	void ResetSubdivisions(entity_pos_t x1, entity_pos_t z1)
@@ -271,9 +279,10 @@ public:
 		UnitShape shape = { ent, x, z, r, clearance, flags, group };
 		u32 id = m_UnitShapeNext++;
 		m_UnitShapes[id] = shape;
-		MakeDirtyUnit(flags, id);
 
 		m_UnitSubdivision.Add(id, CFixedVector2D(x - r, z - r), CFixedVector2D(x + r, z + r));
+
+		MakeDirtyUnit(flags, id, shape);
 
 		return UNIT_INDEX_TO_TAG(id);
 	}
@@ -288,11 +297,12 @@ public:
 		StaticShape shape = { ent, x, z, u, v, w/2, h/2, flags, group, group2 };
 		u32 id = m_StaticShapeNext++;
 		m_StaticShapes[id] = shape;
-		MakeDirtyStatic(flags, id);
 
 		CFixedVector2D center(x, z);
 		CFixedVector2D bbHalfSize = Geometry::GetHalfBoundingBox(u, v, CFixedVector2D(w/2, h/2));
 		m_StaticSubdivision.Add(id, center - bbHalfSize, center + bbHalfSize);
+
+		MakeDirtyStatic(flags, id, shape);
 
 		return STATIC_INDEX_TO_TAG(id);
 	}
@@ -324,6 +334,8 @@ public:
 		{
 			UnitShape& shape = m_UnitShapes[TAG_TO_INDEX(tag)];
 
+			MakeDirtyUnit(shape.flags, TAG_TO_INDEX(tag), shape); // dirty the old shape region
+
 			m_UnitSubdivision.Move(TAG_TO_INDEX(tag),
 				CFixedVector2D(shape.x - shape.r, shape.z - shape.r),
 				CFixedVector2D(shape.x + shape.r, shape.z + shape.r),
@@ -333,7 +345,7 @@ public:
 			shape.x = x;
 			shape.z = z;
 
-			MakeDirtyUnit(shape.flags, TAG_TO_INDEX(tag));
+			MakeDirtyUnit(shape.flags, TAG_TO_INDEX(tag), shape); // dirty the new shape region
 		}
 		else
 		{
@@ -343,6 +355,8 @@ public:
 			CFixedVector2D v(s, c);
 
 			StaticShape& shape = m_StaticShapes[TAG_TO_INDEX(tag)];
+
+			MakeDirtyStatic(shape.flags, TAG_TO_INDEX(tag), shape); // dirty the old shape region
 
 			CFixedVector2D fromBbHalfSize = Geometry::GetHalfBoundingBox(shape.u, shape.v, CFixedVector2D(shape.hw, shape.hh));
 			CFixedVector2D toBbHalfSize = Geometry::GetHalfBoundingBox(u, v, CFixedVector2D(shape.hw, shape.hh));
@@ -357,7 +371,7 @@ public:
 			shape.u = u;
 			shape.v = v;
 
-			MakeDirtyStatic(shape.flags, TAG_TO_INDEX(tag));
+			MakeDirtyStatic(shape.flags, TAG_TO_INDEX(tag), shape); // dirty the new shape region
 		}
 	}
 
@@ -411,7 +425,8 @@ public:
 				CFixedVector2D(shape.x - shape.r, shape.z - shape.r),
 				CFixedVector2D(shape.x + shape.r, shape.z + shape.r));
 
-			MakeDirtyUnit(shape.flags, TAG_TO_INDEX(tag));
+			MakeDirtyUnit(shape.flags, TAG_TO_INDEX(tag), shape);
+
 			m_UnitShapes.erase(TAG_TO_INDEX(tag));
 		}
 		else
@@ -422,7 +437,8 @@ public:
 			CFixedVector2D bbHalfSize = Geometry::GetHalfBoundingBox(shape.u, shape.v, CFixedVector2D(shape.hw, shape.hh));
 			m_StaticSubdivision.Remove(TAG_TO_INDEX(tag), center - bbHalfSize, center + bbHalfSize);
 
-			MakeDirtyStatic(shape.flags, TAG_TO_INDEX(tag));
+			MakeDirtyStatic(shape.flags, TAG_TO_INDEX(tag), shape);
+
 			m_StaticShapes.erase(TAG_TO_INDEX(tag));
 		}
 	}
@@ -451,7 +467,7 @@ public:
 	virtual bool TestStaticShape(const IObstructionTestFilter& filter, entity_pos_t x, entity_pos_t z, entity_pos_t a, entity_pos_t w, entity_pos_t h, std::vector<entity_id_t>* out);
 	virtual bool TestUnitShape(const IObstructionTestFilter& filter, entity_pos_t x, entity_pos_t z, entity_pos_t r, std::vector<entity_id_t>* out);
 
-	virtual void Rasterize(Grid<u16>& grid, const entity_pos_t& expand, ICmpObstructionManager::flags_t requireMask, u16 setMask);
+	virtual void Rasterize(Grid<u16>& grid, const std::vector<PathfinderPassability>& passClasses, bool fullUpdate);
 	virtual void GetObstructionsInRange(const IObstructionTestFilter& filter, entity_pos_t x0, entity_pos_t z0, entity_pos_t x1, entity_pos_t z1, std::vector<ObstructionSquare>& squares);
 	virtual void GetUnitsOnObstruction(const ObstructionSquare& square, std::vector<entity_id_t>& out, const IObstructionTestFilter& filter);
 
@@ -479,29 +495,21 @@ public:
 
 	void RenderSubmit(SceneCollector& collector);
 
-	virtual bool GetDirtinessData(Grid<u8>& dirtinessGrid, bool& globalUpdateNeeded)
+	virtual void UpdateInformations(GridUpdateInformation& informations)
 	{
-		if (!m_Dirty || !m_DirtinessGrid)
-		{
-			globalUpdateNeeded = false;
-			return false;
-		}
+		// If the pathfinder wants to perform a full update, don't change that.
+		if (m_UpdateInformations.dirty && !informations.globalRecompute)
+			informations = m_UpdateInformations;
 
-		dirtinessGrid = *m_DirtinessGrid;
-		globalUpdateNeeded = m_NeedsGlobalUpdate;
-
-		m_Dirty = false;
-		m_NeedsGlobalUpdate = false;
-		m_DirtinessGrid->reset();
-
-		return true;
+		m_UpdateInformations.Clean();
 	}
 
 private:
 	// Dynamic updates for the long-range pathfinder
-	bool m_Dirty;
-	bool m_NeedsGlobalUpdate;
-	Grid<u8>* m_DirtinessGrid;
+	GridUpdateInformation m_UpdateInformations;
+	// These vectors might contain shapes that were deleted
+	std::vector<u32> m_DirtyStaticShapes;
+	std::vector<u32> m_DirtyUnitShapes;
 
 	/**
 	 * Mark all previous Rasterize()d grids as dirty, and the debug display.
@@ -509,8 +517,11 @@ private:
 	 */
 	void MakeDirtyAll()
 	{
-		m_Dirty = true;
-		m_NeedsGlobalUpdate = true;
+		m_UpdateInformations.dirty = true;
+		m_UpdateInformations.globallyDirty = true;
+		m_UpdateInformations.globalRecompute = true;
+		m_UpdateInformations.dirtinessGrid.reset();
+
 		m_DebugOverlayDirty = true;
 	}
 
@@ -525,52 +536,101 @@ private:
 
 	inline void MarkDirtinessGrid(const entity_pos_t& x, const entity_pos_t& z, const entity_pos_t& r)
 	{
-		if (!m_DirtinessGrid)
+		MarkDirtinessGrid(x, z, CFixedVector2D(r, r));
+	}
+
+	inline void MarkDirtinessGrid(const entity_pos_t& x, const entity_pos_t& z, const CFixedVector2D& hbox)
+	{
+		ENSURE(m_UpdateInformations.dirtinessGrid.m_W == m_TerrainTiles*Pathfinding::NAVCELLS_PER_TILE &&
+			m_UpdateInformations.dirtinessGrid.m_H == m_TerrainTiles*Pathfinding::NAVCELLS_PER_TILE);
+		if (m_TerrainTiles == 0)
 			return;
 
 		u16 j0, j1, i0, i1;
-		Pathfinding::NearestNavcell(x - r, z - r, i0, j0, m_DirtinessGrid->m_W, m_DirtinessGrid->m_H);
-		Pathfinding::NearestNavcell(x + r, z + r, i1, j1, m_DirtinessGrid->m_W, m_DirtinessGrid->m_H);
+		Pathfinding::NearestNavcell(x - hbox.X, z - hbox.Y, i0, j0, m_UpdateInformations.dirtinessGrid.m_W, m_UpdateInformations.dirtinessGrid.m_H);
+		Pathfinding::NearestNavcell(x + hbox.X, z + hbox.Y, i1, j1, m_UpdateInformations.dirtinessGrid.m_W, m_UpdateInformations.dirtinessGrid.m_H);
 
 		for (int j = j0; j < j1; ++j)
 			for (int i = i0; i < i1; ++i)
-				m_DirtinessGrid->set(i, j, 1);
+				m_UpdateInformations.dirtinessGrid.set(i, j, 1);
 	}
 
 	/**
 	 * Mark all previous Rasterize()d grids as dirty, if they depend on this shape.
 	 * Call this when a static shape has changed.
 	 */
-	void MakeDirtyStatic(flags_t flags, u32 index)
+	void MakeDirtyStatic(flags_t flags, u32 index, const StaticShape& shape)
 	{
+		m_DebugOverlayDirty = true;
+
 		if (flags & (FLAG_BLOCK_PATHFINDING | FLAG_BLOCK_FOUNDATION))
 		{
-			m_Dirty = true;
+			m_UpdateInformations.dirty = true;
 
-			auto it = m_StaticShapes.find(index);
-			if (it != m_StaticShapes.end())
-				MarkDirtinessGrid(it->second.x, it->second.z, std::max(it->second.hw, it->second.hh));
+			if (std::find(m_DirtyStaticShapes.begin(), m_DirtyStaticShapes.end(), index) == m_DirtyStaticShapes.end())
+				m_DirtyStaticShapes.push_back(index);
+
+			// All shapes overlapping the updated part of the grid should be dirtied too.
+			// We are going to invalidate the region of the grid corresponding to the modified shape plus its clearance,
+			// and we need to get the shapes whose clearance can overlap this area. So we need to extend the search area
+			// by two times the maximum clearance.
+
+			CFixedVector2D center(shape.x, shape.z);
+			CFixedVector2D hbox = Geometry::GetHalfBoundingBox(shape.u, shape.v, CFixedVector2D(shape.hw, shape.hh));
+			CFixedVector2D expand(m_MaxClearance, m_MaxClearance);
+
+			std::vector<u32> staticsNear;
+			m_StaticSubdivision.GetInRange(staticsNear, center - hbox - expand*2, center + hbox + expand*2);
+			for (u32& staticId : staticsNear)
+				if (std::find(m_DirtyStaticShapes.begin(), m_DirtyStaticShapes.end(), staticId) == m_DirtyStaticShapes.end())
+					m_DirtyStaticShapes.push_back(staticId);
+
+			std::vector<u32> unitsNear;
+			m_UnitSubdivision.GetInRange(unitsNear, center - hbox - expand*2, center + hbox + expand*2);
+			for (u32& unitId : unitsNear)
+				if (std::find(m_DirtyUnitShapes.begin(), m_DirtyUnitShapes.end(), unitId) == m_DirtyUnitShapes.end())
+					m_DirtyUnitShapes.push_back(unitId);
+
+			MarkDirtinessGrid(shape.x, shape.z, hbox + expand);
 		}
-
-		m_DebugOverlayDirty = true;
 	}
 
 	/**
 	 * Mark all previous Rasterize()d grids as dirty, if they depend on this shape.
 	 * Call this when a unit shape has changed.
 	 */
-	void MakeDirtyUnit(flags_t flags, u32 index)
+	void MakeDirtyUnit(flags_t flags, u32 index, const UnitShape& shape)
 	{
+		m_DebugOverlayDirty = true;
+
 		if (flags & (FLAG_BLOCK_PATHFINDING | FLAG_BLOCK_FOUNDATION))
 		{
-			m_Dirty = true;
+			m_UpdateInformations.dirty = true;
 
-			auto it = m_UnitShapes.find(index);
-			if (it != m_UnitShapes.end())
-				MarkDirtinessGrid(it->second.x, it->second.z, it->second.r);
+			if (std::find(m_DirtyUnitShapes.begin(), m_DirtyUnitShapes.end(), index) == m_DirtyUnitShapes.end())
+				m_DirtyUnitShapes.push_back(index);
+
+			// All shapes overlapping the updated part of the grid should be dirtied too.
+			// We are going to invalidate the region of the grid corresponding to the modified shape plus its clearance,
+			// and we need to get the shapes whose clearance can overlap this area. So we need to extend the search area
+			// by two times the maximum clearance.
+
+			CFixedVector2D center(shape.x, shape.z);
+
+			std::vector<u32> staticsNear;
+			m_StaticSubdivision.GetNear(staticsNear, center, shape.r + m_MaxClearance*2);
+			for (u32& staticId : staticsNear)
+				if (std::find(m_DirtyStaticShapes.begin(), m_DirtyStaticShapes.end(), staticId) == m_DirtyStaticShapes.end())
+					m_DirtyStaticShapes.push_back(staticId);
+
+			std::vector<u32> unitsNear;
+			m_UnitSubdivision.GetNear(staticsNear, center, shape.r + m_MaxClearance*2);
+			for (u32& unitId : unitsNear)
+				if (std::find(m_DirtyUnitShapes.begin(), m_DirtyUnitShapes.end(), unitId) == m_DirtyUnitShapes.end())
+					m_DirtyUnitShapes.push_back(unitId);
+
+			MarkDirtinessGrid(shape.x, shape.z, shape.r + m_MaxClearance);
 		}
-
-		m_DebugOverlayDirty = true;
 	}
 
 	/**
@@ -588,6 +648,8 @@ private:
 	{
 		return (m_WorldX0 <= p.X && p.X <= m_WorldX1 && m_WorldZ0 <= p.Y && p.Y <= m_WorldZ1);
 	}
+
+	void RasterizeHelper(Grid<u16>& grid, ICmpObstructionManager::flags_t requireMask, bool fullUpdate, u16 appliedMask, entity_pos_t clearance = fixed::Zero());
 };
 
 REGISTER_COMPONENT_TYPE(ObstructionManager)
@@ -763,32 +825,66 @@ bool CCmpObstructionManager::TestUnitShape(const IObstructionTestFilter& filter,
 		return false; // didn't collide, if we got this far
 }
 
-void CCmpObstructionManager::Rasterize(Grid<u16>& grid, const entity_pos_t& expand, ICmpObstructionManager::flags_t requireMask, u16 setMask)
+void CCmpObstructionManager::Rasterize(Grid<u16>& grid, const std::vector<PathfinderPassability>& passClasses, bool fullUpdate)
 {
 	PROFILE3("Rasterize");
-
-	// Since m_DirtyID is only updated for pathfinding/foundation blocking shapes,
-	// NeedUpdate+Rasterize will only be accurate for that subset of shapes.
-	// (If we ever want to support rasterizing more shapes, we need to improve
-	// the dirty-detection system too.)
-	ENSURE(!(requireMask & ~(FLAG_BLOCK_PATHFINDING|FLAG_BLOCK_FOUNDATION)));
 
 	// Cells are only marked as blocked if the whole cell is strictly inside the shape.
 	// (That ensures the shape's geometric border is always reachable.)
 
-	// TODO: it might be nice to rasterize with rounded corners for large 'expand' values.
+	// Pass classes will get shapes rasterized on them depending on their Obstruction value.
+	// Classes with another value than "pathfinding" should not use Clearance.
 
-	// (This could be implemented much more efficiently.)
+	std::map<entity_pos_t, u16> pathfindingMasks;
+	u16 foundationMask = 0;
+	for (const PathfinderPassability& passability : passClasses)
+	{
+		switch (passability.m_Obstructions)
+		{
+		case PathfinderPassability::PATHFINDING:
+		{
+			auto it = pathfindingMasks.find(passability.m_Clearance);
+			if (it == pathfindingMasks.end())
+				pathfindingMasks[passability.m_Clearance] = passability.m_Mask;
+			else
+				it->second |= passability.m_Mask;
+			break;
+		}
+		case PathfinderPassability::FOUNDATION:
+			foundationMask |= passability.m_Mask;
+			break;
+		default:
+			continue;
+		}
+	}
 
+	// FLAG_BLOCK_PATHFINDING and FLAG_BLOCK_FOUNDATION are the only flags taken into account by MakeDirty* functions,
+	// so they should be the only ones rasterized using with the help of m_Dirty*Shapes vectors.
+
+	for (auto& maskPair : pathfindingMasks)
+		RasterizeHelper(grid, FLAG_BLOCK_PATHFINDING, fullUpdate, maskPair.second, maskPair.first);
+
+	RasterizeHelper(grid, FLAG_BLOCK_FOUNDATION, fullUpdate, foundationMask);
+
+	m_DirtyStaticShapes.clear();
+	m_DirtyUnitShapes.clear();
+}
+
+void CCmpObstructionManager::RasterizeHelper(Grid<u16>& grid, ICmpObstructionManager::flags_t requireMask, bool fullUpdate, u16 appliedMask, entity_pos_t clearance)
+{
 	for (auto& pair : m_StaticShapes)
 	{
+		if (!fullUpdate && std::find(m_DirtyStaticShapes.begin(), m_DirtyStaticShapes.end(), pair.first) == m_DirtyStaticShapes.end())
+			continue;
+
 		const StaticShape& shape = pair.second;
 		if (!(shape.flags & requireMask))
 			continue;
 
+		// TODO: it might be nice to rasterize with rounded corners for large 'expand' values.
 		ObstructionSquare square = { shape.x, shape.z, shape.u, shape.v, shape.hw, shape.hh };
 		SimRasterize::Spans spans;
-		SimRasterize::RasterizeRectWithClearance(spans, square, expand, Pathfinding::NAVCELL_SIZE);
+		SimRasterize::RasterizeRectWithClearance(spans, square, clearance, Pathfinding::NAVCELL_SIZE);
 		for (SimRasterize::Span& span : spans)
 		{
 			i16 j = span.j;
@@ -797,26 +893,29 @@ void CCmpObstructionManager::Rasterize(Grid<u16>& grid, const entity_pos_t& expa
 				i16 i0 = std::max(span.i0, (i16)0);
 				i16 i1 = std::min(span.i1, (i16)grid.m_W);
 				for (i16 i = i0; i < i1; ++i)
-					grid.set(i, j, grid.get(i, j) | setMask);
+					grid.set(i, j, grid.get(i, j) | appliedMask);
 			}
 		}
 	}
 
 	for (auto& pair : m_UnitShapes)
 	{
+		if (!fullUpdate && std::find(m_DirtyUnitShapes.begin(), m_DirtyUnitShapes.end(), pair.first) == m_DirtyUnitShapes.end())
+			continue;
+
 		CFixedVector2D center(pair.second.x, pair.second.z);
 
 		if (!(pair.second.flags & requireMask))
 			continue;
 
-		entity_pos_t r = pair.second.r + expand;
+		entity_pos_t r = pair.second.r + clearance;
 
 		u16 i0, j0, i1, j1;
 		Pathfinding::NearestNavcell(center.X - r, center.Y - r, i0, j0, grid.m_W, grid.m_H);
 		Pathfinding::NearestNavcell(center.X + r, center.Y + r, i1, j1, grid.m_W, grid.m_H);
 		for (u16 j = j0+1; j < j1; ++j)
 			for (u16 i = i0+1; i < i1; ++i)
-				grid.set(i, j, grid.get(i, j) | setMask);
+				grid.set(i, j, grid.get(i, j) | appliedMask);
 	}
 }
 
@@ -877,17 +976,11 @@ void CCmpObstructionManager::GetUnitsOnObstruction(const ObstructionSquare& squa
 	// units s.t. the RasterizeRectWithClearance of the building's shape with the
 	// unit's clearance covers the navcell the unit is on.
 
-	CmpPtr<ICmpPathfinder> cmpPathfinder(GetSystemEntity());
-	if (!cmpPathfinder)
-		return;
-
-	entity_pos_t maxClearance = cmpPathfinder->GetMaximumClearance();
-
 	std::vector<entity_id_t> unitShapes;
 	CFixedVector2D center(square.x, square.z);
 	CFixedVector2D expandedBox =
 		Geometry::GetHalfBoundingBox(square.u, square.v, CFixedVector2D(square.hw, square.hh)) +
-		CFixedVector2D(maxClearance, maxClearance);
+		CFixedVector2D(m_MaxClearance, m_MaxClearance);
 	m_UnitSubdivision.GetInRange(unitShapes, center - expandedBox, center + expandedBox);
 
 	std::map<entity_pos_t, SimRasterize::Spans> rasterizedRects;

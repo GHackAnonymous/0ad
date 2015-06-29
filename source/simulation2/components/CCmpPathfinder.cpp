@@ -49,10 +49,10 @@ void CCmpPathfinder::Init(const CParamNode& UNUSED(paramNode))
 {
 	m_MapSize = 0;
 	m_Grid = NULL;
-	m_BaseGrid = NULL;
+	m_TerrainOnlyGrid = NULL;
 
-	m_ObstructionsDirty = true;
-	m_TerrainDirty = true;
+	m_ObstructionsDirty.Clean();
+	m_PreserveUpdateInformations = false;
 
 	m_NextAsyncTicket = 1;
 
@@ -104,7 +104,7 @@ void CCmpPathfinder::Deinit()
 	SetDebugOverlay(false); // cleans up memory
 
 	SAFE_DELETE(m_Grid);
-	SAFE_DELETE(m_BaseGrid);
+	SAFE_DELETE(m_TerrainOnlyGrid);
 }
 
 struct SerializeLongRequest
@@ -170,16 +170,11 @@ void CCmpPathfinder::HandleMessage(const CMessage& msg, bool UNUSED(global))
 	case MT_TerrainChanged:
 	case MT_WaterChanged:
 	case MT_ObstructionMapShapeChanged:
-	{
-		// TODO PATHFINDER: we ought to only bother updating the dirtied region
 		m_TerrainDirty = true;
 		break;
-	}
 	case MT_TurnStart:
-	{
 		m_SameTurnMovesCount = 0;
 		break;
-	}
 	}
 }
 
@@ -208,6 +203,16 @@ std::map<std::string, pass_class_t> CCmpPathfinder::GetPassabilityClasses()
 	return m_PassClassMasks;
 }
 
+std::map<std::string, pass_class_t> CCmpPathfinder::GetPathfindingPassabilityClasses()
+{
+	std::map<std::string, pass_class_t> pathfindingClasses;
+	for (auto& pair : m_PassClassMasks)
+		if (GetPassabilityFromMask(pair.second)->m_Obstructions == PathfinderPassability::PATHFINDING)
+			pathfindingClasses[pair.first] = pair.second;
+
+	return pathfindingClasses;
+}
+
 const PathfinderPassability* CCmpPathfinder::GetPassabilityFromMask(pass_class_t passClass) const
 {
 	for (const PathfinderPassability& passability : m_PassClasses)
@@ -221,7 +226,12 @@ const PathfinderPassability* CCmpPathfinder::GetPassabilityFromMask(pass_class_t
 
 const Grid<u16>& CCmpPathfinder::GetPassabilityGrid()
 {
-	UpdateGrid();
+	if (!m_Grid)
+	{
+		UpdateGrid();
+		m_PreserveUpdateInformations = true;
+	}
+
 	return *m_Grid;
 }
 
@@ -473,14 +483,16 @@ void CCmpPathfinder::UpdateGrid()
 	if (!cmpTerrain)
 		return; // error
 
-	bool forceGlobalUpdate = false;
+	if (!m_PreserveUpdateInformations)
+		m_ObstructionsDirty.Clean();
+	else
+		m_PreserveUpdateInformations = false; // Next time will be a regular update
 
 	// If the terrain was resized then delete the old grid data
 	if (m_Grid && m_MapSize != cmpTerrain->GetTilesPerSide())
 	{
 		SAFE_DELETE(m_Grid);
-		SAFE_DELETE(m_BaseGrid);
-		m_TerrainDirty = true;
+		SAFE_DELETE(m_TerrainOnlyGrid);
 	}
 
 	// Initialise the terrain data when first needed
@@ -488,25 +500,23 @@ void CCmpPathfinder::UpdateGrid()
 	{
 		m_MapSize = cmpTerrain->GetTilesPerSide();
 		m_Grid = new Grid<NavcellData>(m_MapSize * Pathfinding::NAVCELLS_PER_TILE, m_MapSize * Pathfinding::NAVCELLS_PER_TILE);
-		m_BaseGrid = new Grid<NavcellData>(m_MapSize * Pathfinding::NAVCELLS_PER_TILE, m_MapSize * Pathfinding::NAVCELLS_PER_TILE);
-		forceGlobalUpdate = true;
+		m_TerrainOnlyGrid = new Grid<NavcellData>(m_MapSize * Pathfinding::NAVCELLS_PER_TILE, m_MapSize * Pathfinding::NAVCELLS_PER_TILE);
+
+		m_ObstructionsDirty.dirty = true;
+		m_ObstructionsDirty.globallyDirty = true;
+		m_ObstructionsDirty.globalRecompute = true;
+
 		m_TerrainDirty = true;
 	}
 
 	CmpPtr<ICmpObstructionManager> cmpObstructionManager(GetSimContext(), SYSTEM_ENTITY);
-	if (forceGlobalUpdate)
-	{
-		m_ObstructionsDirty = true;
-		m_ObstructionsGlobalUpdate = true;
-	}
-	else
-		m_ObstructionsDirty = cmpObstructionManager->GetDirtinessData(m_DirtinessGrid, m_ObstructionsGlobalUpdate);
+	cmpObstructionManager->UpdateInformations(m_ObstructionsDirty);
 
-	if (!m_ObstructionsDirty && !m_TerrainDirty)
+	if (!m_ObstructionsDirty.dirty && !m_TerrainDirty)
 		return;
 
-	// If the terrain has changed, recompute entirely m_Grid
-	// Else, use data from m_BaseGrid and add obstructions
+	// If the terrain has changed, recompute m_Grid
+	// Else, use data from m_TerrainOnlyGrid and add obstructions
 	if (m_TerrainDirty)
 	{
 		Grid<u16> shoreGrid = ComputeShoreGrid();
@@ -562,53 +572,57 @@ void CCmpPathfinder::UpdateGrid()
 		}
 
 		// Expand the impassability grid, for any class with non-zero clearance,
-		// so that we can stop units getting too close to impassable navcells
+		// so that we can stop units getting too close to impassable navcells.
+		// Note: It's not possible to perform this expansion once for all passabilities
+		// with the same clearance, because the impassable cells are not necessarily the 
+		// same for all these passabilities.
 		for (PathfinderPassability& passability : m_PassClasses)
 		{
-			if (!passability.m_HasClearance)
+			if (passability.m_Clearance == fixed::Zero())
 				continue;
 
-			// TODO: if multiple classes have the same clearance, we should
-			// only bother doing this once for them all
 			int clearance = (passability.m_Clearance / Pathfinding::NAVCELL_SIZE).ToInt_RoundToInfinity();
-			if (clearance > 0)
-				ExpandImpassableCells(*m_Grid, clearance, passability.m_Mask);
-		}
+			ExpandImpassableCells(*m_Grid, clearance, passability.m_Mask);
+		}			
 
 		// Store the updated terrain-only grid
-		*m_BaseGrid = *m_Grid;
+		*m_TerrainOnlyGrid = *m_Grid;
+
 		m_TerrainDirty = false;
+		m_ObstructionsDirty.globalRecompute = true;
+		m_ObstructionsDirty.globallyDirty = true;
+	}
+	else if (m_ObstructionsDirty.globalRecompute)
+	{
+		ENSURE(m_Grid->m_W == m_TerrainOnlyGrid->m_W && m_Grid->m_H == m_TerrainOnlyGrid->m_H);
+		memcpy(m_Grid->m_Data, m_TerrainOnlyGrid->m_Data, (m_Grid->m_W)*(m_Grid->m_H)*sizeof(NavcellData));
+
+		m_ObstructionsDirty.globallyDirty = true;
 	}
 	else
 	{
-		ENSURE(m_Grid->m_W == m_BaseGrid->m_W && m_Grid->m_H == m_BaseGrid->m_H);
-		memcpy(m_Grid->m_Data, m_BaseGrid->m_Data, (m_Grid->m_W)*(m_Grid->m_H)*sizeof(NavcellData));
+		ENSURE(m_Grid->m_W == m_ObstructionsDirty.dirtinessGrid.m_W && m_Grid->m_H == m_ObstructionsDirty.dirtinessGrid.m_H);
+		ENSURE(m_Grid->m_W == m_TerrainOnlyGrid->m_W && m_Grid->m_H == m_TerrainOnlyGrid->m_H);
+
+		for (u16 i = 0; i < m_ObstructionsDirty.dirtinessGrid.m_W; ++i)
+			for (u16 j = 0; j < m_ObstructionsDirty.dirtinessGrid.m_H; ++j)
+				if (m_ObstructionsDirty.dirtinessGrid.get(i, j) == 1)
+					m_Grid->set(i, j, m_TerrainOnlyGrid->get(i, j));
 	}
 
-	// TODO: tweak rasterizing conditions
-	// Add obstructions onto the grid, for any class with (possibly zero) clearance
-	for (PathfinderPassability& passability : m_PassClasses)
-	{
-		// TODO: if multiple classes have the same clearance, we should
-		// only bother running Rasterize once for them all
-		if (passability.m_HasClearance)
-			cmpObstructionManager->Rasterize(*m_Grid, passability.m_Clearance, ICmpObstructionManager::FLAG_BLOCK_PATHFINDING, passability.m_Mask);
-	}
+	// Add obstructions onto the grid
+	cmpObstructionManager->Rasterize(*m_Grid, m_PassClasses, m_ObstructionsDirty.globalRecompute);
 
-	if (m_ObstructionsGlobalUpdate)
-		m_LongPathfinder.Reload(m_PassClassMasks, m_Grid);
+	// Update the long-range pathfinder
+	if (m_ObstructionsDirty.globallyDirty)
+		m_LongPathfinder.Reload(GetPathfindingPassabilityClasses(), m_Grid);
 	else
-		m_LongPathfinder.Update(m_Grid, &m_DirtinessGrid);
+		m_LongPathfinder.Update(m_Grid, m_ObstructionsDirty.dirtinessGrid);
 }
 
-bool CCmpPathfinder::GetDirtinessData(Grid<u8>& dirtinessGrid, bool& globalUpdateNeeded)
+const GridUpdateInformation& CCmpPathfinder::GetDirtinessData() const
 {
-	if (!m_ObstructionsDirty)
-		return false;
-
-	dirtinessGrid = m_DirtinessGrid;
-	globalUpdateNeeded = m_ObstructionsGlobalUpdate;
-	return true;
+	return m_ObstructionsDirty;
 }
 
 //////////////////////////////////////////////////////////
@@ -778,8 +792,6 @@ ICmpObstruction::EFoundationCheck CCmpPathfinder::CheckBuildingPlacement(const I
 
 	// Test against terrain:
 
-	UpdateGrid();
-
 	ICmpObstructionManager::ObstructionSquare square;
 	CmpPtr<ICmpObstruction> cmpObstruction(GetSimContext(), id);
 	if (!cmpObstruction || !cmpObstruction->GetObstructionSquare(square))
@@ -787,7 +799,7 @@ ICmpObstruction::EFoundationCheck CCmpPathfinder::CheckBuildingPlacement(const I
 
 	entity_pos_t expand;
 	const PathfinderPassability* passability = GetPassabilityFromMask(passClass);
-	if (passability && passability->m_HasClearance)
+	if (passability)
 		expand = passability->m_Clearance;
 
 	SimRasterize::Spans spans;

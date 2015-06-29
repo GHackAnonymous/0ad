@@ -34,7 +34,6 @@ Armour.prototype.Schema =
 
 Armour.prototype.Init = function()
 {
-	this.nextAlertTime = 0;
 	this.invulnerable = false;
 };
 
@@ -47,20 +46,8 @@ Armour.prototype.SetInvulnerability = function(invulnerability)
  * Take damage according to the entity's armor.
  * Returns object of the form { "killed": false, "change": -12 }
  */
-Armour.prototype.TakeDamage = function(hack, pierce, crush, source)
+Armour.prototype.TakeDamage = function(hack, pierce, crush)
 {
-	// Alert target owner of attack
-	var cmpAttackDetection = QueryOwnerInterface(this.entity, IID_AttackDetection);
-	if (cmpAttackDetection)
-	{
-		var now = Engine.QueryInterface(SYSTEM_ENTITY, IID_Timer).GetTime();
-		if (now > this.nextAlertTime)
-		{
-			this.nextAlertTime = now + cmpAttackDetection.GetSuppressionTime();
-			cmpAttackDetection.AttackAlert(this.entity, source);
-		}
-	}
-
 	if (this.invulnerable) 
 		return { "killed": false, "change": 0 };
 
@@ -82,41 +69,26 @@ Armour.prototype.TakeDamage = function(hack, pierce, crush, source)
 Armour.prototype.GetArmourStrengths = function()
 {
 	// Work out the armour values with technology effects
-	var self = this;
-	
-	var applyMods = function(type, foundation)
-	{
+	var applyMods = (type, foundation) => {
 		var strength;
 		if (foundation) 
 		{
-			strength = +self.template.Foundation[type];
+			strength = +this.template.Foundation[type];
 			type = "Foundation/" + type;
 		}
 		else
-		{
-			strength = +self.template[type];
-		}
+			strength = +this.template[type];
 		
-		strength = ApplyValueModificationsToEntity("Armour/" + type, strength, self.entity);
-		return strength;
+		return ApplyValueModificationsToEntity("Armour/" + type, strength, this.entity);
 	};
 	
-	if (Engine.QueryInterface(this.entity, IID_Foundation) && this.template.Foundation) 
-	{
-		return {
-			hack: applyMods("Hack", true),
-			pierce: applyMods("Pierce", true),
-			crush: applyMods("Crush", true)
-		};
-	}
-	else
-	{
-		return {
-			hack: applyMods("Hack"),
-			pierce: applyMods("Pierce"),
-			crush: applyMods("Crush")
-		};
-	}
+	var foundation = Engine.QueryInterface(this.entity, IID_Foundation) && this.template.Foundation;
+
+	return {
+		"hack": applyMods("Hack", foundation),
+		"pierce": applyMods("Pierce", foundation),
+		"crush": applyMods("Crush", foundation)
+	};
 };
 
 Engine.RegisterComponentType(IID_DamageReceiver, "Armour", Armour);
